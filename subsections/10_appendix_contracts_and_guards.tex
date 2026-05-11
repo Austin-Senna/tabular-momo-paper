@@ -1,7 +1,7 @@
-\section{Appendix: Contract Schemas, Guards, and Flag Composition}
+\section{Appendix: Contracts, Guards, Runtime Controls, and Configuration}
 \label{sec:appendix}
 
-This appendix records implementation-level details of the contract schemas, the runtime guards, the sprint prompt blocks, and the flag composition rules. The intent is to make the paper's claims about the architecture verifiable against the code without requiring readers to navigate the repository.
+This appendix records implementation-level details of the contract schemas, the runtime guards, the optional runtime controls, the CLI surface, and the flag composition rules.
 
 \subsection{Search Contract Fields}
 
@@ -59,15 +59,15 @@ Field & Type & Role \\
 Field & Description \\
 \midrule
 \texttt{status} & \texttt{success} / \texttt{partial} / \texttt{failed} / \texttt{budget\_exhausted} \\
-\texttt{candidates} (search) & list of source-family handles + brief justification \\
+\texttt{candidates} (search) & source-family handles + brief justification \\
 \texttt{search\_summary} (search) & one-sentence description of what was tried \\
 \texttt{missing\_coverage} (search) & traits not satisfied by any candidate \\
 \texttt{retry\_recommendation} (search) & structured suggestion for retry \\
 \texttt{failure\_reason} (search) & present only on \texttt{failed} \\
-\texttt{answer\_fragments} (inspect) & evidence keyed by entries in \texttt{required\_outputs} \\
+\texttt{answer\_fragments} (inspect) & evidence keyed by \texttt{required\_outputs} entries \\
 \texttt{missing\_outputs} (inspect) & required outputs not produced \\
-\texttt{evidence} (inspect) & citations (file paths, row ranges, query digests) \\
-\texttt{executor\_summary} (inspect) & one- or two-sentence description of what was done \\
+\texttt{evidence} (inspect) & citations (paths, row ranges, query digests) \\
+\texttt{executor\_summary} (inspect) & one- or two-sentence summary \\
 \texttt{retry\_recommended} (inspect) & boolean + optional structured hint \\
 \bottomrule
 \end{tabular}
@@ -96,23 +96,38 @@ def run_inspect_contract(contract):
     return validate_return(worker.last_contract_return)
 \end{verbatim}
 
-The search lifecycle is structurally identical; the only differences are the tool surface (\texttt{SEARCH\_TOOLS} instead of \texttt{INSPECT\_TOOLS}) and the omission of \texttt{InspectSourceGuard}.
+The search lifecycle is structurally identical; the differences are the tool surface (\texttt{SEARCH\_TOOLS} instead of \texttt{INSPECT\_TOOLS}) and the omission of \texttt{InspectSourceGuard}.
 
 \subsection{Runtime Guards}
 
-\paragraph{\texttt{\_FileReferenceGuard}.} A \texttt{SteeringHandler} subclass that intercepts tool calls before execution. It blocks (a) any call referencing a dataset only by \texttt{dataset\_id} without an accompanying \texttt{file\_path} or \texttt{s3\_uri}; and (b) any call whose \texttt{s3\_uri} is outside the data-lake bucket allowlist (e.g., \texttt{lakeqa-yc4103-datalake/\{datagov,wikipedia\}}). Blocked calls return a structured contract-violation error message that the worker can act on.
+\paragraph{\texttt{\_FileReferenceGuard}.} A \texttt{SteeringHandler} subclass that intercepts tool calls before execution. It blocks (a) any call referencing a dataset only by \texttt{dataset\_id} without an accompanying \texttt{file\_path} or \texttt{s3\_uri}; and (b) any call whose \texttt{s3\_uri} is outside the data-lake bucket allowlist. Blocked calls return a structured contract-violation error the worker can act on.
 
-\paragraph{\texttt{\_InspectSourceGuard}.} A second \texttt{SteeringHandler} subclass that restricts an inspect worker to the \texttt{source\_family\_ids} in its contract. Tool calls referencing other dataset IDs or file paths outside the allowed families are blocked at the runtime layer, before the call reaches the underlying tool.
+\paragraph{\texttt{\_InspectSourceGuard}.} A second \texttt{SteeringHandler} subclass that restricts an inspect worker to the \texttt{source\_family\_ids} declared in its contract. Tool calls referencing other datasets or file paths are blocked at the runtime layer.
 
-\subsection{Sprint Prompt Blocks}
+\subsection{Optional Runtime Controls (Detail)}
 
-The \texttt{sprint\_block()} function emits one of two persistent prompt blocks, depending on \texttt{sprint\_mode}:
+\paragraph{\texttt{results} --- profile-enriched peeks.} The \texttt{peek\_file} and \texttt{peek\_multiple} wrappers delegate to the baseline implementation and then attach a \texttt{profile} field loaded from \texttt{data/datagov\_tables\_profiles.jsonl} (precomputed) or from the ideal-search wrapper's schema cache. The profile contains schema columns, table kind, LLM-authored description, snippet, optional row counts, top rows, and per-column statistics (null rate, distinct count, min/max/mean for numeric columns). If no profile is available the field is omitted silently. The tool docstring instructs the agent to read the profile before issuing more expensive queries.
 
-\paragraph{Cadence mode.} ``Every $k$ counted tool calls, you must call \texttt{sprint(kind="cadence", state\_of\_task=\ldots)} before continuing. The runtime will block additional tool calls until you do.''
+\paragraph{\texttt{cot} --- structured pre/post-tool records.} The \texttt{cot} tool takes two kinds. \texttt{kind="pre\_tool"} fields: \texttt{intended\_tool}, \texttt{current\_step}, \texttt{intent}, \texttt{confidence}. \texttt{kind="post\_tool"} fields: \texttt{completed\_tool}, \texttt{current\_step}, \texttt{tool\_result\_summary}, \texttt{next\_step}, \texttt{sufficient\_to\_call\_step\_complete}, \texttt{remaining\_gap\_if\_not\_complete}. The \texttt{CoTSteerHandler} plugin cancels any data-tool call that lacks a preceding pre-tool record, and appends a post-tool schema reminder to tool results to make compliance more attention-grabbing than a system-prompt-only directive.
 
-\paragraph{Commitment mode.} ``Before working on a new source, call \texttt{sprint(kind="commitment\_contract", current\_source, commitment\_goal, max\_source\_calls, plan\_step)}. On budget exhaustion or source switch, call \texttt{sprint(kind="commitment\_reflection", potential\_answer, answer\_confidence, settled\_facts, short\_forward\_plan)}.''
+\paragraph{\texttt{sprint} --- single-agent commitment control.} The \texttt{sprint\_block()} function emits one of two persistent prompt blocks. \emph{Cadence:} ``Every $k$ counted tool calls, call \texttt{sprint(kind="cadence", state\_of\_task=\dots)} before continuing. The runtime blocks additional tool calls until you do.'' \emph{Commitment:} ``Before working on a new source, call \texttt{sprint(kind="commitment\_contract", current\_source, commitment\_goal, max\_source\_calls, plan\_step)}. On budget exhaustion or source switch, call \texttt{sprint(kind="commitment\_reflection", potential\_answer, answer\_confidence, settled\_facts, short\_forward\_plan)}.'' In both modes the \texttt{sprint} tool writes a \texttt{\#\# CURRENT SPRINT} section into the agent's system prompt via an \texttt{upsert\_prompt\_section} helper, so the commitment is visible to the model on every subsequent turn without rederivation.
 
-In both modes, the \texttt{sprint} tool calls a private \texttt{upsert\_prompt\_section} helper to write a \texttt{\#\# CURRENT SPRINT} section into the agent's system prompt in place. The section is visible to the model on every subsequent turn without requiring the agent to re-derive it from history.
+\subsection{CLI Flags}
+
+The CLI entrypoint \texttt{run\_sana\_eval.py} exposes the configuration surface used in Section~\ref{sec:experiments}:
+
+\begin{itemize}
+\item \texttt{--search\_tool} $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--search\_results} $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--agent\_management} (alias \texttt{--plans}) $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--computation\_tool} $\in$ \{standard, ideal, $\ldots$\}.
+\item \texttt{--max\_tool\_calls N}, \texttt{--k N} (macro-reflection cadence).
+\item \texttt{--sana-feature \{sprint,cot,results,delegation\}} (repeatable).
+\item \texttt{--sprint-mode \{cadence,commitment\}}, \texttt{--commitment-budget-calls N}.
+\item \texttt{--max-search-subagent-calls N}, \texttt{--max-inspect-subagent-calls N}.
+\end{itemize}
+
+A friendly preset wrapper provides reproducible smoke and full evaluation configurations.
 
 \subsection{Flag Composition Matrix}
 
@@ -132,4 +147,4 @@ delegation  & A & A & X & A \\
 \end{tabular}
 \end{table}
 
-The \texttt{sprint}/\texttt{delegation} mutual exclusion reflects the architectural choice to treat them as alternative runtime-control strategies. The other three flags (\texttt{results}, \texttt{cot}, plus either of the two control strategies) are independent: any subset can be enabled together. All flags default to off, in which case \texttt{SanaDataLakeAgent} reduces to the baseline \texttt{DataLakeAgent} (modulo the optional summarizing conversation manager).
+The \texttt{sprint}/\texttt{delegation} mutual exclusion reflects the architectural choice to treat them as alternative control-plane strategies. The other three flags are independent: any subset can be enabled together. All flags default to off, in which case \texttt{SanaDataLakeAgent} reduces to the baseline \texttt{DataLakeAgent} (modulo the optional summarizing conversation manager).

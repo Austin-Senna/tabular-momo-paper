@@ -1,57 +1,49 @@
 \section{Experiments}
 \label{sec:experiments}
 
-This section presents the experimental harness, research questions, and result tables for MOMO. We follow the SANA paper's reporting conventions: shared benchmark, shared model lineup, shared tool budgets and tracing. Where MOMO-specific result numbers depend on result-CSV runs that have not yet completed, we mark cells \texttt{--} and describe what the table will report. The qualitative payoff of this draft is the failure-taxonomy table (Table~\ref{tab:failure}), which is independent of the pending numeric results.
+We evaluate MOMO at the workflow level: not only end-to-end accuracy but tool waste, context pollution, source-switch churn, partial-success handling, and cost. The control-plane claim is that these workflow-level pathologies, not retrieval, dominate single-agent tabular QA failures, and that contract-bounded executors plus runtime guards reduce them in measurable, mechanism-specific ways. Numeric cells dependent on result CSVs that have not yet been produced are marked \texttt{--}; the failure-mode taxonomy (Table~\ref{tab:failure}) is the qualitative contribution of this draft and is independent of pending numbers.
 
 \subsection{Research Questions}
 
 \begin{itemize}
-\item \textbf{RQ1.} Does the delegation architecture (planner + bounded subagents) improve task completion over single-agent baselines under matched budgets and tool surfaces?
-\item \textbf{RQ2.} Which failure modes from Section~\ref{sec:diagnosis} does each MOMO mechanism (\texttt{results}, \texttt{cot}, \texttt{sprint}, \texttt{delegation}) reduce, and which remain?
-\item \textbf{RQ3.} How does the subagent budget (in particular \texttt{max\_inspect\_subagent\_calls}) trade off cost, partial-rate, and end-to-end success?
+\item \textbf{RQ1.} Does the control plane reduce \emph{workflow-level pathologies} --- turn waste, context-token growth, source-switch churn --- over a matched single-agent baseline under matched budgets and tool surfaces?
+\item \textbf{RQ2.} Which failure modes from Table~\ref{tab:failure} does each control-plane mechanism (\texttt{results}, \texttt{cot}, \texttt{sprint}, \texttt{delegation}) reduce, and which remain?
+\item \textbf{RQ3.} How does the subagent budget trade off cost, partial-rate, and end-to-end success, i.e., the cost-aware-decision axis?
 \end{itemize}
 
 \subsection{Setup}
 
-Benchmark: the LakeQA-derived multi-source public-data task suite~\cite{wang2026lakeqa}, identical to the SANA paper's task set. Models: \texttt{gpt-5-mini} and \texttt{gpt-5.4-nano}, matched to the SANA model lineup. Tool budgets and tracing are shared across all conditions; each run logs per-tool-call latency, token usage, and cost. Search modes (standard, ideal, preloaded) are inherited from the SANA harness so MOMO conditions can be paired with each diagnostic search regime.
+Benchmark: the LakeQA-derived multi-source public-data task suite~\cite{wang2026lakeqa}, identical to the companion SANA paper's task set. Models: \texttt{gpt-5-mini} and \texttt{gpt-5.4-nano}. Tool budgets and tracing are shared across all conditions. The harness records, per task and per condition, the workflow-level evaluation surface: per-tool-call latency, token usage, cost, source-switch counts, peek-without-query rate, query-failure rate, context-token growth between turns, subagent budget-exhaustion rate, and per-contract status distribution. Search modes (\texttt{standard}, \texttt{ideal}, \texttt{preloaded}) are inherited from the SANA harness so MOMO conditions can be paired with each diagnostic search regime.
 
 \subsection{Main Comparison}
 
-Table~\ref{tab:main} reports accuracy (exact match, semantic match), task success rate, average tool calls, average cost, and the rate of timeout / context-exhaustion failures across the variants. Rows compare single-agent baselines (with and without idealized search) against MOMO variants. \texttt{MOMO-Delegate+Results} stacks the cheap-observation lever on top of the delegation architecture.
+Table~\ref{tab:main} compares single-agent baselines against MOMO variants on both accuracy-style metrics and the workflow-level differentiators (average source switches, average context tokens at submit). The control-plane prediction is that MOMO variants will not necessarily dominate on accuracy but will reduce source switches and context tokens at submit while maintaining or improving success rate at comparable cost.
 
 \begin{table*}[t]
-\caption{Main comparison across variants. Numeric cells pending result CSV. ``$\ast$'' indicates SANA-paper diagnostic conditions reused as references.}
+\caption{Main comparison across variants. Numeric cells pending result CSV. ``$\ast$'' indicates SANA-paper diagnostic conditions reused as references. Source-switch and context-token columns are the workflow-level differentiators.}
 \label{tab:main}
 \centering
-\begin{tabular}{lllrrrrr}
+\begin{tabular}{lllrrrrrrr}
 \toprule
-Variant & Search & Plan & Acc.\ (EM/F1) & Success & Avg.\ calls & Avg.\ cost & Timeout/ctx \\
+Variant & Search & Plan & Acc. & Success & Avg.\ calls & Avg.\ cost & Timeout & Src.\ sw. & Ctx.\ tok. \\
 \midrule
-Baseline single agent$^{\ast}$           & standard  & standard & -- & -- & -- & -- & -- \\
-Ideal-search single agent$^{\ast}$       & ideal     & standard & -- & -- & -- & -- & -- \\
-Preloaded single agent$^{\ast}$          & preloaded & standard & -- & -- & -- & -- & -- \\
-MOMO-Results                             & preloaded & standard & -- & -- & -- & -- & -- \\
-MOMO-Sprint (commitment)                 & preloaded & standard & -- & -- & -- & -- & -- \\
-MOMO-Delegate                            & preloaded & standard & -- & -- & -- & -- & -- \\
-MOMO-Delegate + Results                  & preloaded & standard & -- & -- & -- & -- & -- \\
+Baseline single agent$^{\ast}$           & standard  & standard & -- & -- & -- & -- & -- & -- & -- \\
+Ideal-search single agent$^{\ast}$       & ideal     & standard & -- & -- & -- & -- & -- & -- & -- \\
+Preloaded single agent$^{\ast}$          & preloaded & standard & -- & -- & -- & -- & -- & -- & -- \\
+MOMO-Results                             & preloaded & standard & -- & -- & -- & -- & -- & -- & -- \\
+MOMO-Sprint (commitment)                 & preloaded & standard & -- & -- & -- & -- & -- & -- & -- \\
+MOMO-Delegate                            & preloaded & standard & -- & -- & -- & -- & -- & -- & -- \\
+MOMO-Delegate + Results                  & preloaded & standard & -- & -- & -- & -- & -- & -- & -- \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-The expected ordering, given our trace-level qualitative observations, is that MOMO-Delegate improves success rate over the matched single-agent baseline most clearly under the standard search regime --- the regime in which the stopping-rule failure dominates. Under preloaded search, where source discovery is removed entirely, the delegation gap is smaller but the context-pollution gap (manifesting as a lower timeout/ctx rate) is wider. We will validate or refute this ordering once the results are run.
+\subsection{Search-Regime $\times$ Control-Plane Diagnostic}
 
-\subsection{Stopping-Rule Diagnostic}
-
-Table~\ref{tab:stopping} pairs each search regime with each MOMO control strategy. The interpretation of the diagnostic is as follows.
-
-\begin{itemize}
-\item \textbf{Standard search} tests whether the agent can decide \emph{when} to stop searching. This is the regime where the stopping-rule failure is most visible.
-\item \textbf{Preloaded sources} removes source discovery entirely, exposing pure execution-discipline behavior --- schema thrash, zero-row loops, premature submit.
-\item \textbf{MOMO-Delegate} bounds search and inspection separately, so the planner cannot burn the entire run on source thrash even when standard search is in use.
-\end{itemize}
+Table~\ref{tab:stopping} pairs each search regime with each MOMO control-plane strategy. Standard search tests whether the agent can decide \emph{when} to stop searching. Preloaded sources removes source discovery entirely, exposing pure execution-discipline behavior. MOMO delegation bounds search and inspection separately, so the planner cannot burn the entire run on source thrash even under standard search.
 
 \begin{table}[t]
-\caption{Stopping-rule diagnostic. Rows: control strategy; columns: search regime. Cells pending result CSV.}
+\caption{Search-regime $\times$ control-plane diagnostic. Cells pending result CSV.}
 \label{tab:stopping}
 \centering
 \begin{tabular}{lrrr}
@@ -65,35 +57,35 @@ Delegation (MOMO)         & -- & -- & -- \\
 \end{tabular}
 \end{table}
 
-\subsection{Failure-Mode Taxonomy}
+\subsection{Failure-Mode $\rightarrow$ Control-Plane Mechanism}
 
-Table~\ref{tab:failure} is the qualitative spine of this paper. It enumerates the failure modes identified in Section~\ref{sec:diagnosis}, the trace signal we use to label them, and the MOMO mechanism that addresses each. The mapping is independent of pending numeric results and stands as a contribution on its own: each row is a hypothesis about \emph{why} a single-agent failure occurs and a concrete architectural intervention that should reduce its rate.
+Table~\ref{tab:failure} is the qualitative spine of this paper. Each row enumerates a failure mode from \S\ref{sec:architecture}'s motivation, the trace signal we use to label it, the control-plane mechanism that addresses it, and the workflow metric in Table~\ref{tab:main} the row predicts to move. The mapping is independent of pending numeric results.
 
 \begin{table*}[t]
-\caption{Failure-mode taxonomy and addressing MOMO mechanism.}
+\caption{Failure-mode taxonomy, addressing control-plane mechanism, and the workflow metric predicted to move under the addressing mechanism.}
 \label{tab:failure}
 \centering
-\begin{tabular}{p{0.20\textwidth}p{0.40\textwidth}p{0.32\textwidth}}
+\begin{tabular}{p{0.16\textwidth}p{0.30\textwidth}p{0.28\textwidth}p{0.18\textwidth}}
 \toprule
-Failure mode & Trace signal & MOMO mechanism \\
+Failure mode & Trace signal & Control-plane mechanism & Workflow metric impacted \\
 \midrule
-Over-searching & repeated search calls after relevant source already found & bounded \texttt{search\_subagent} budget \\
-Schema thrashing & repeated peek/query cycles on the same file with no progress & bounded \texttt{inspect\_subagent} budget; \texttt{cot} post-tool record \\
-File-handle errors & dataset ID supplied without exact file path; ``file not found'' tracebacks & \texttt{\_FileReferenceGuard} \\
-Source drift & inspect-time peeks/queries on datasets outside the intended family & \texttt{\_InspectSourceGuard} \\
-Zero-row loop & repeated filtered queries returning zero rows on the same file & worker-local retry; compact \texttt{failed} return \\
-Context bloat & long schemas / row dumps / tracebacks dominate planner context & context firewall (compact returns) \\
-Redundant verification & re-queries of already-established facts across turns & sprint \texttt{commitment\_reflection} or planner evidence summaries \\
-Premature submit & final answer before all \texttt{required\_outputs} covered & \texttt{missing\_outputs} list in partial-status protocol \\
+Over-searching          & repeated search calls after relevant source already found & bounded \texttt{search\_subagent} budget                          & avg.\ tool calls, cost \\
+Schema thrashing        & repeated peek/query cycles on same file with no progress  & bounded \texttt{inspect\_subagent} budget; \texttt{cot} post-tool & avg.\ tool calls, success \\
+File-handle errors      & dataset ID without exact path; ``file not found'' tracebacks & \texttt{\_FileReferenceGuard}                                  & timeout/ctx, success \\
+Source drift            & inspect-time peeks/queries outside intended family        & \texttt{\_InspectSourceGuard}                                     & source switches \\
+Zero-row loop           & repeated filtered queries returning zero rows             & worker-local retry; compact \texttt{failed} return                & avg.\ tool calls, cost \\
+Context bloat           & schemas / row dumps / tracebacks dominate planner context & context firewall (compact returns)                                & ctx.\ tokens, success \\
+Redundant verification  & re-queries of already-established facts                   & \texttt{sprint} \texttt{commitment\_reflection}; planner summaries & avg.\ tool calls \\
+Premature submit        & final answer before \texttt{required\_outputs} covered    & \texttt{missing\_outputs} list in partial-status protocol         & success, accuracy \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-We will report, for at least one model, the fraction of single-agent failures that fall into each row of Table~\ref{tab:failure}, and the corresponding fraction under each MOMO configuration. This per-row reduction is the most direct measure of which mechanism contributes to which failure mode.
+Per-row reduction --- the fraction of single-agent failures in each row, paired with the fraction under each MOMO configuration --- is the most direct measure of which mechanism contributes to which failure mode, and is the per-model breakdown the result CSVs will populate.
 
 \subsection{Subagent-Budget Sensitivity}
 
-Table~\ref{tab:budget} sweeps \texttt{max\_inspect\_subagent\_calls} with \texttt{max\_search\_subagent\_calls=3} and grace calls $= 1$ held fixed. The interesting trade-off is between tighter inspect budgets (lower cost, higher \texttt{partial}/\texttt{budget\_exhausted} rates) and wider inspect budgets (lower partial rate but higher cost, with diminishing returns past a setting-specific threshold).
+Table~\ref{tab:budget} sweeps \texttt{max\_inspect\_subagent\_calls} with \texttt{max\_search\_subagent\_calls=3} and grace calls $= 1$ held fixed. The trade-off of interest is between tighter inspect budgets (lower cost, higher partial / budget-exhausted rates) and wider inspect budgets (lower partial rate but higher cost, with diminishing returns past a setting-specific threshold).
 
 \begin{table}[t]
 \caption{Subagent-budget sensitivity. Cells pending result CSV.}
@@ -110,6 +102,6 @@ Inspect budget & Avg.\ subagent calls & Partial rate & Budget-exhausted rate & C
 \end{tabular}
 \end{table}
 
-\subsection{Honesty Statement}
+\subsection*{Honesty Statement}
 
-We report the harness, the variants, and the metric definitions. Final numeric cells in Tables~\ref{tab:main}, \ref{tab:stopping}, and \ref{tab:budget} will be filled once the result CSVs are produced. Table~\ref{tab:failure} is the qualitative contribution of this draft and is independent of pending numeric results. Where the discussion (Section~\ref{sec:discussion}) anticipates an empirical pattern, we say so explicitly and treat it as a hypothesis to be tested rather than a result.
+We report the harness, the variants, the workflow-level metrics, and the failure-mode $\rightarrow$ control-plane mechanism mapping. Numeric cells in Tables~\ref{tab:main}, \ref{tab:stopping}, and \ref{tab:budget} will be filled once the result CSVs are produced; the discussion that follows treats anticipated patterns as hypotheses, not claims.

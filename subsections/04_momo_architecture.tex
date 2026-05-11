@@ -1,93 +1,48 @@
-\section{The Tabular MOMO Architecture}
+\section{A Runtime Control Plane for Tabular QA}
 \label{sec:architecture}
 
-\subsection{Overview}
+\subsection{Control-Plane Architecture}
 
-MOMO defines three roles. A \textbf{planner} orchestrates the task at a high level: it decomposes the question, decides what to search for, decides which sources to commit to, and produces the final answer. Two classes of \textbf{subagent} do the data-touching work: a \textbf{search subagent} discovers candidate datasets, and an \textbf{inspect subagent} extracts evidence from a chosen source family. Under MOMO's delegation mode, the planner's tool surface is reduced to four tools: planning utilities, a final-answer tool, \texttt{search\_subagent(contract)}, and \texttt{inspect\_subagent(contract)}. Raw search, peek, SQL, code-execution, and download tools are removed from the planner. This single restriction is what makes the planner an \emph{orchestrator} rather than a \emph{doer}.
+MOMO defines a control plane with three roles. A \textbf{planner} orchestrates the task at a high level: it decomposes the question, decides what to search for, decides which sources to commit to, and produces the final answer. Two classes of \textbf{contract executors} do the data-touching work: a \textbf{search subagent} discovers candidate datasets, and an \textbf{inspect subagent} extracts evidence from a chosen source family. Under MOMO's delegation mode, the planner's tool surface is reduced to four tools: planning utilities, a final-answer tool, \texttt{search\_subagent(contract)}, and \texttt{inspect\_subagent(contract)}. Raw search, peek, SQL, code-execution, and download tools are removed from the planner. This single restriction is what makes the planner an \emph{orchestrator}.
 
-Both subagent classes are spawned fresh per contract, run to completion or budget exhaustion, and emit a single compact return. Their internal scratchpads --- including any schemas, query attempts, tracebacks, or partial results --- are discarded on return. The planner never sees them. This is the \emph{context firewall}.
+Both executor classes are spawned fresh per contract, run to completion or budget exhaustion, and emit a single compact return. Their internal scratchpads --- any schemas, query attempts, tracebacks, or partial results --- are discarded on return. The planner never sees them. This is the \emph{context firewall}, the central system-level property of the control plane.
 
-\subsection{The Search Contract}
+\subsection{Source-Discovery Contracts}
 
-The search subagent receives a \texttt{SearchContract} containing:
+The search subagent receives a \texttt{SearchContract} with: \texttt{contract\_id} for traceability and retry linking; \texttt{search\_goal}, a natural-language objective; \texttt{required\_source\_traits}, structured hints such as ``contains county FIPS codes'' or ``covers 2019--2021''; \texttt{budget\_calls}, a hard upper bound; \texttt{constraints}, exclusion criteria and tie-breakers; \texttt{known\_context}, datasets or facts the planner has already established; and \texttt{requested\_budget\_calls}, the planner's preferred budget, which the runtime may revise downward.
 
-\begin{itemize}
-\item \texttt{contract\_id} --- an identifier for traceability and retries.
-\item \texttt{search\_goal} --- a natural-language description of what is being looked for, including any specificity the planner has already inferred.
-\item \texttt{required\_source\_traits} --- structured hints (e.g., ``contains county FIPS codes,'' ``covers 2019--2021,'' ``daily granularity'').
-\item \texttt{budget\_calls} --- hard upper bound on tool calls.
-\item \texttt{constraints} --- exclusion criteria and tie-breaking preferences.
-\item \texttt{known\_context} --- any datasets or facts the planner has already established that the worker should not re-discover.
-\item \texttt{requested\_budget\_calls} --- the planner's preferred budget, which the runtime may revise downward.
-\end{itemize}
+The search worker has access to retrieval and lightweight peek/profile tools, but not to query, code execution, or download. Its return schema is: \texttt{status} $\in$ \{\texttt{success}, \texttt{partial}, \texttt{failed}, \texttt{budget\_exhausted}\}; \texttt{candidates}, a small list of source-family handles with brief justifications; \texttt{search\_summary}; \texttt{missing\_coverage}, traits not satisfied by any candidate; \texttt{retry\_recommendation}, structured suggestions for a refined retry contract; and \texttt{failure\_reason} on \texttt{failed}.
 
-The search worker has access to retrieval tools and lightweight peek/profile tools, but \emph{not} to query, code execution, or download. Its return schema is:
+\subsection{Source-Commitment Contracts}
 
-\begin{itemize}
-\item \texttt{status} $\in$ \{\texttt{success}, \texttt{partial}, \texttt{failed}, \texttt{budget\_exhausted}\}.
-\item \texttt{candidates} --- a small list of source-family handles with brief justifications.
-\item \texttt{search\_summary} --- a sentence-level description of what was tried.
-\item \texttt{missing\_coverage} --- traits from \texttt{required\_source\_traits} that were not satisfied by any candidate.
-\item \texttt{retry\_recommendation} --- if \texttt{partial} or \texttt{failed}, structured suggestions for what to vary in a retry contract.
-\item \texttt{failure\_reason} --- present only on \texttt{failed}.
-\end{itemize}
+The inspect subagent receives an \texttt{InspectContract} with: \texttt{contract\_id}; \texttt{objective}; \texttt{source\_family\_ids}, explicit identifiers for the dataset family the worker is allowed to touch; \texttt{required\_outputs}, an enumerated list of evidence pieces; \texttt{success\_criteria}; \texttt{budget\_calls}; \texttt{constraints} (e.g., size or runtime caps); \texttt{known\_context}; \texttt{retry\_of\_contract\_id}, non-empty when this is a retry; and \texttt{requested\_budget\_calls}.
 
-The status-and-coverage shape is what makes the search contract composable: the planner can decide to retry with a refined contract, accept partial coverage and move on, or escalate to a different strategy, all without inspecting the worker's raw activity.
+The inspect worker can use the full tabular tool set --- peek, read, grep, parse XML, query files, download, and execute code --- but cannot see planner tools or invoke search. Its return schema includes \texttt{answer\_fragments} keyed by entries in \texttt{required\_outputs}; \texttt{missing\_outputs}, the entries it could not produce; \texttt{evidence} pointers (file paths, row ranges, query digests); \texttt{executor\_summary}; and \texttt{retry\_recommended} with an optional structured hint.
 
-\subsection{The Inspect Contract}
+The \textbf{partial-success protocol} is load-bearing: a worker that finds 2019 and 2020 data but not 2021 returns \texttt{status="partial"} with \texttt{answer\_fragments=\{2019:\dots,2020:\dots\}} and \texttt{missing\_outputs=[2021]}. The planner can act on \texttt{missing\_outputs} directly --- retry with a different source family, accept the gap, or report it in the final answer --- without inspecting a raw traceback.
 
-The inspect subagent receives an \texttt{InspectContract} containing:
+\subsection{Runtime Guards}
 
-\begin{itemize}
-\item \texttt{contract\_id} --- as above.
-\item \texttt{objective} --- a natural-language description of what evidence is needed from this source family.
-\item \texttt{source\_family\_ids} --- explicit identifiers for the dataset (or small group of related datasets) the worker is allowed to touch.
-\item \texttt{required\_outputs} --- an enumerated list of the pieces of evidence the planner expects (e.g., ``2019 figure,'' ``2020 figure,'' ``2021 figure'').
-\item \texttt{success\_criteria} --- conditions for declaring \texttt{success}.
-\item \texttt{budget\_calls} --- hard upper bound on tool calls.
-\item \texttt{constraints} --- e.g., ``do not download files larger than 100 MB.''
-\item \texttt{known\_context} --- prior context the worker should treat as established.
-\item \texttt{retry\_of\_contract\_id} --- present when this contract is a retry of a previously \texttt{partial}/\texttt{failed} attempt.
-\item \texttt{requested\_budget\_calls} --- planner-preferred budget.
-\end{itemize}
+Two \texttt{SteeringHandler}-based guards act as execution-discipline operators in the control plane.
 
-The inspect worker can use the full tabular tool set --- peek, read, grep, parse XML, query files, download, execute code --- but it cannot see planner tools or invoke further search subagents. Its return schema is:
+The \textbf{\texttt{\_FileReferenceGuard}} blocks any data-tool call whose arguments reference a dataset only by logical ID, with no accompanying \texttt{s3\_uri} or \texttt{dataset\_id+file\_path} pair. It also blocks references outside the data-lake bucket allowlist. Bookkeeping errors surface immediately as contract violations rather than ``file not found'' retries that drain the worker's budget.
 
-\begin{itemize}
-\item \texttt{status} $\in$ \{\texttt{success}, \texttt{partial}, \texttt{failed}, \texttt{budget\_exhausted}\}.
-\item \texttt{answer\_fragments} --- the pieces of evidence the worker extracted, keyed by entries in \texttt{required\_outputs}.
-\item \texttt{missing\_outputs} --- entries from \texttt{required\_outputs} that the worker could not produce. \textbf{This list is the planner's primary signal of partial progress.}
-\item \texttt{evidence} --- short citations (file paths, row ranges, query digests) supporting each fragment.
-\item \texttt{executor\_summary} --- one or two sentences describing what was done.
-\item \texttt{retry\_recommended} --- boolean, plus an optional structured hint for the next contract.
-\end{itemize}
+The \textbf{\texttt{\_InspectSourceGuard}} restricts an inspect worker to the \texttt{source\_family\_ids} declared in its contract. Tool calls referencing other datasets are blocked at the runtime layer, before the call reaches the underlying tool. Source drift is prevented structurally; the worker cannot rationalize its way into a tangential dataset.
 
-We emphasize the \textbf{partial-success protocol}: a worker that finds 2019 and 2020 data but not 2021 returns \texttt{status="partial"} with \texttt{answer\_fragments=\{2019:\dots, 2020:\dots\}} and \texttt{missing\_outputs=[2021]}. This is structurally different from silently producing the two values, or from forcing the planner to read a traceback to learn that 2021 failed. The planner can act on \texttt{missing\_outputs} directly --- by retrying with a different source family, by accepting the gap explicitly, or by reporting it in the final answer.
+\subsection{Context Isolation and Provenance}
 
-\subsection{Source-Handle and Source-Family Discipline}
+The context firewall is implemented through bounded workers plus compact return tools. Each subagent calls its \texttt{contract\_return} tool exactly once, with a payload conforming to the return schemas above. Schemas, row dumps, long tracebacks, and failed SQL attempts never enter the planner's conversation. A \texttt{\_SubagentToolLedger} attached to each worker records subagent start and end events, per-call tool budgets, the list of tools invoked, token usage, and cost --- producing \textbf{provenance over agent execution traces} that is available to evaluation and post-hoc analysis but not visible to the planner.
 
-Two \texttt{SteeringHandler}-based guards enforce execution discipline at the runtime level.
+A planner that issues four inspect contracts sees four compact returns totaling a few hundred tokens of structured evidence and missing-output lists. The same task in a single-agent baseline exposes the planner to four schema dumps (potentially thousands of tokens), several failed-query tracebacks, and partial row dumps from peek calls.
 
-The \textbf{\texttt{\_FileReferenceGuard}} blocks any data-tool call whose arguments reference a dataset only by logical ID, with no exact \texttt{s3\_uri} or \texttt{dataset\_id+file\_path} pair. It also blocks references outside the data-lake bucket allowlist. The guard's effect is to surface bookkeeping errors immediately as contract violations, rather than letting them manifest as silent ``file not found'' retries that drain the worker's budget.
+\subsection{Optional Runtime Controls}
 
-The \textbf{\texttt{\_InspectSourceGuard}} restricts an inspect worker to the \texttt{source\_family\_ids} named in its contract. If the worker attempts to peek, query, or read a dataset outside that set, the call is blocked with a structured error. This prevents source drift: a worker cannot rationalize its way into a tangentially-related dataset, because the runtime will not let it.
+Three companion features are exposed as separable feature flags and can be combined with delegation. They give the control plane additional levers without changing its core shape; appendix~\ref{sec:appendix} carries the detailed prompt and tool specifications.
 
-These guards are deliberately framed as \emph{execution-discipline mechanisms}, not safety filters. Their purpose is to convert easy-to-miss failure modes (file-handle errors, source drift) into immediate, recoverable contract violations.
+\paragraph{\texttt{results}.} Wraps \texttt{peek\_file} and \texttt{peek\_multiple} to attach a precomputed profile (schema columns, table kind, LLM-authored description, snippet, optional row counts, top rows, and per-column statistics). The wrapper improves data-environment perception, reducing unnecessary inspection and query calls.
 
-\subsection{The Context Firewall}
+\paragraph{\texttt{cot}.} Forces structured pre-tool and post-tool records via a \texttt{cot} tool. A \texttt{CoTSteerHandler} plugin cancels tool calls that violate the protocol, replacing free-text chain-of-thought compliance with runtime enforcement.
 
-The context firewall is implemented through bounded workers plus compact return tools. Each subagent is instructed to call its \texttt{contract\_return} tool exactly once, with a payload conforming to the return schemas above. Raw schemas, row dumps, long tracebacks, and failed SQL attempts never enter the planner's conversation. The runtime separately records subagent start and end events, per-call tool budgets, the list of tools invoked, token usage, and cost, via a \texttt{\_SubagentToolLedger} attached to the worker. The ledger is available to evaluation but is not visible to the planner.
+\paragraph{\texttt{sprint}.} Single-agent commitment control. In \texttt{cadence} mode, every $k$ counted tool calls the agent must call \texttt{sprint(kind="cadence",\dots)} before continuing. In \texttt{commitment} mode, the agent must declare a source-commitment contract before working on a source and reflect on budget exhaustion or source switch. The \texttt{sprint} tool writes a persistent \texttt{\#\# CURRENT SPRINT} section into the agent's system prompt.
 
-The architectural payoff is concrete: a planner that issues four inspect contracts during a task sees four compact returns in its context, totaling perhaps a few hundred tokens of structured evidence and missing-output lists. The same task run in a single-agent baseline would expose the planner to four sets of schemas (potentially thousands of tokens of column metadata), several failed query tracebacks, partial row dumps from peek calls, and so on. The context firewall lets the planner reason at the task level while the workers reason at the file level.
-
-\subsection{Companion Control Primitives}
-
-Three companion features are exposed as separable feature flags. They can be enabled independently from delegation, which lets us measure each mechanism's contribution.
-
-\paragraph{The \texttt{results} flag (cheap observation).} When enabled, \texttt{peek\_file} and \texttt{peek\_multiple} are wrapped to attach a pre-computed profile to each result: schema columns, table kind, an LLM-authored description, a short snippet, optional row counts, top rows, and per-column statistics (null rate, distinct count, min/max/mean for numeric columns). The wrapped tool's docstring instructs the agent to read the profile \emph{before} issuing more expensive queries. The flag operationalizes a single intuition: a small structured summary is much cheaper than executing exploratory SQL, and is often sufficient to decide whether a source is worth committing to.
-
-\paragraph{The \texttt{cot} flag (structured tool-use records).} When enabled, the agent must call a \texttt{cot} tool with \texttt{kind="pre\_tool"} (declaring the intended tool, current plan step, intent, and confidence) immediately before any data-tool call, and \texttt{cot} with \texttt{kind="post\_tool"} (recording the completed tool, a result summary, a next step, a sufficient-to-complete flag, and a remaining-gap statement) immediately after. A \texttt{CoTSteerHandler} plugin enforces this protocol by cancelling tool calls that violate it. This replaces free-text chain-of-thought compliance --- which the model can ignore --- with an enforced protocol.
-
-\paragraph{The \texttt{sprint} flag (single-agent commitment control).} The \texttt{sprint} flag is the single-agent counterpart to delegation. It operates in two modes. In \texttt{cadence} mode, every $k$ counted tool calls the agent is required to call \texttt{sprint(kind="cadence", ...)} before continuing, producing a brief state-of-task readout. In \texttt{commitment} mode, the agent must declare a source-commitment contract (current source, commitment goal, max source calls, plan step) before working on a source, and must call \texttt{sprint(kind="commitment\_reflection", ...)} on budget exhaustion or source switch. The \texttt{sprint} tool writes a persistent \texttt{\#\# CURRENT SPRINT} section into the agent's system prompt via an \texttt{upsert\_prompt\_section} primitive, so the commitment is visible to the model on every subsequent turn.
-
-\paragraph{Delegation vs.\ sprint.} We treat \texttt{sprint} and \texttt{delegation} as \emph{alternative} runtime-control strategies and enforce mutual exclusion in the flag validator. \texttt{sprint} addresses the stopping-rule problem within a single agent by forcing periodic self-reports; \texttt{delegation} addresses it across agents by lifting the commitment boundary up one level. Both are runtime-control interventions over the same underlying problem; comparing them on the same benchmark is one of the experimental axes in Section~\ref{sec:experiments}.
+\paragraph{Delegation vs.\ sprint.} The two are alternative control-plane strategies and are mutually exclusive in the flag validator. \texttt{sprint} forces a single agent to commit and reflect; \texttt{delegation} lifts the commitment boundary up one level. The two expose different trade-offs between accuracy, cost, interruptiveness, and context hygiene, not strict improvements over each other.
