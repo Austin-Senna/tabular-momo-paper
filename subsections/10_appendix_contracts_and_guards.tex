@@ -1,0 +1,135 @@
+\section{Appendix: Contract Schemas, Guards, and Flag Composition}
+\label{sec:appendix}
+
+This appendix records implementation-level details of the contract schemas, the runtime guards, the sprint prompt blocks, and the flag composition rules. The intent is to make the paper's claims about the architecture verifiable against the code without requiring readers to navigate the repository.
+
+\subsection{Search Contract Fields}
+
+\begin{table}[h]
+\caption{\texttt{SearchContract} fields. Types are nominal.}
+\label{tab:search-contract}
+\centering
+\begin{tabular}{lll}
+\toprule
+Field & Type & Role \\
+\midrule
+\texttt{contract\_id} & str & traceability and retry linking \\
+\texttt{search\_goal} & str & natural-language objective \\
+\texttt{required\_source\_traits} & list[str] & structured trait hints \\
+\texttt{budget\_calls} & int & runtime-enforced upper bound \\
+\texttt{constraints} & list[str] & exclusion criteria and tie-breakers \\
+\texttt{known\_context} & dict & already-established facts/datasets \\
+\texttt{requested\_budget\_calls} & int & planner preference \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Inspect Contract Fields}
+
+\begin{table}[h]
+\caption{\texttt{InspectContract} fields.}
+\label{tab:inspect-contract}
+\centering
+\begin{tabular}{lll}
+\toprule
+Field & Type & Role \\
+\midrule
+\texttt{contract\_id} & str & traceability \\
+\texttt{objective} & str & natural-language evidence target \\
+\texttt{source\_family\_ids} & list[str] & runtime-scoped allowlist \\
+\texttt{required\_outputs} & list[str] & enumerated evidence pieces \\
+\texttt{success\_criteria} & list[str] & conditions for \texttt{success} \\
+\texttt{budget\_calls} & int & runtime-enforced upper bound \\
+\texttt{constraints} & list[str] & e.g., size or runtime caps \\
+\texttt{known\_context} & dict & established prior context \\
+\texttt{retry\_of\_contract\_id} & str? & non-empty when this is a retry \\
+\texttt{requested\_budget\_calls} & int & planner preference \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Return Schemas}
+
+\begin{table}[h]
+\caption{Return schemas. \texttt{status} is shared across both contract types.}
+\label{tab:return-schema}
+\centering
+\begin{tabular}{lp{0.34\textwidth}}
+\toprule
+Field & Description \\
+\midrule
+\texttt{status} & \texttt{success} / \texttt{partial} / \texttt{failed} / \texttt{budget\_exhausted} \\
+\texttt{candidates} (search) & list of source-family handles + brief justification \\
+\texttt{search\_summary} (search) & one-sentence description of what was tried \\
+\texttt{missing\_coverage} (search) & traits not satisfied by any candidate \\
+\texttt{retry\_recommendation} (search) & structured suggestion for retry \\
+\texttt{failure\_reason} (search) & present only on \texttt{failed} \\
+\texttt{answer\_fragments} (inspect) & evidence keyed by entries in \texttt{required\_outputs} \\
+\texttt{missing\_outputs} (inspect) & required outputs not produced \\
+\texttt{evidence} (inspect) & citations (file paths, row ranges, query digests) \\
+\texttt{executor\_summary} (inspect) & one- or two-sentence description of what was done \\
+\texttt{retry\_recommended} (inspect) & boolean + optional structured hint \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Delegation Runtime Lifecycle (Pseudocode)}
+
+\begin{verbatim}
+def run_inspect_contract(contract):
+    validate_schema(contract)
+    worker = spawn_agent(
+        tool_surface = INSPECT_TOOLS,
+        guards       = [FileReferenceGuard(),
+                        InspectSourceGuard(
+                          allowed=contract.source_family_ids)],
+        budget_steer = SubagentBudgetSteer(
+                          budget=contract.budget_calls,
+                          grace=1),
+        ledger       = SubagentToolLedger(),
+    )
+    inject_system_prompt(worker, contract)
+    while not worker.done:
+        worker.step()
+        if worker.budget_exhausted():
+            return forced_return(worker, status="budget_exhausted")
+    return validate_return(worker.last_contract_return)
+\end{verbatim}
+
+The search lifecycle is structurally identical; the only differences are the tool surface (\texttt{SEARCH\_TOOLS} instead of \texttt{INSPECT\_TOOLS}) and the omission of \texttt{InspectSourceGuard}.
+
+\subsection{Runtime Guards}
+
+\paragraph{\texttt{\_FileReferenceGuard}.} A \texttt{SteeringHandler} subclass that intercepts tool calls before execution. It blocks (a) any call referencing a dataset only by \texttt{dataset\_id} without an accompanying \texttt{file\_path} or \texttt{s3\_uri}; and (b) any call whose \texttt{s3\_uri} is outside the data-lake bucket allowlist (e.g., \texttt{lakeqa-yc4103-datalake/\{datagov,wikipedia\}}). Blocked calls return a structured contract-violation error message that the worker can act on.
+
+\paragraph{\texttt{\_InspectSourceGuard}.} A second \texttt{SteeringHandler} subclass that restricts an inspect worker to the \texttt{source\_family\_ids} in its contract. Tool calls referencing other dataset IDs or file paths outside the allowed families are blocked at the runtime layer, before the call reaches the underlying tool.
+
+\subsection{Sprint Prompt Blocks}
+
+The \texttt{sprint\_block()} function emits one of two persistent prompt blocks, depending on \texttt{sprint\_mode}:
+
+\paragraph{Cadence mode.} ``Every $k$ counted tool calls, you must call \texttt{sprint(kind="cadence", state\_of\_task=\ldots)} before continuing. The runtime will block additional tool calls until you do.''
+
+\paragraph{Commitment mode.} ``Before working on a new source, call \texttt{sprint(kind="commitment\_contract", current\_source, commitment\_goal, max\_source\_calls, plan\_step)}. On budget exhaustion or source switch, call \texttt{sprint(kind="commitment\_reflection", potential\_answer, answer\_confidence, settled\_facts, short\_forward\_plan)}.''
+
+In both modes, the \texttt{sprint} tool calls a private \texttt{upsert\_prompt\_section} helper to write a \texttt{\#\# CURRENT SPRINT} section into the agent's system prompt in place. The section is visible to the model on every subsequent turn without requiring the agent to re-derive it from history.
+
+\subsection{Flag Composition Matrix}
+
+\begin{table}[h]
+\caption{Composition of MOMO feature flags. ``A'' = allowed; ``X'' = forbidden (validated at config time).}
+\label{tab:flag-matrix}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+ & results & cot & sprint & delegation \\
+\midrule
+results     & A & A & A & A \\
+cot         & A & A & A & A \\
+sprint      & A & A & A & X \\
+delegation  & A & A & X & A \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \texttt{sprint}/\texttt{delegation} mutual exclusion reflects the architectural choice to treat them as alternative runtime-control strategies. The other three flags (\texttt{results}, \texttt{cot}, plus either of the two control strategies) are independent: any subset can be enabled together. All flags default to off, in which case \texttt{SanaDataLakeAgent} reduces to the baseline \texttt{DataLakeAgent} (modulo the optional summarizing conversation manager).

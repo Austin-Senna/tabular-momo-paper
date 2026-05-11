@@ -1,0 +1,24 @@
+\section{Problem Setting and Related Work}
+\label{sec:problem}
+
+\subsection{Exploratory QA over Data Lakes}
+
+We adopt the exploratory QA setting introduced by LakeQA~\cite{wang2026lakeqa}: an agent answers natural-language questions over a heterogeneous public-data lake containing CSV, Parquet, JSON, and semi-structured XML files. Questions typically require one or more datasets and may involve filtering, aggregation, time alignment, and cross-source reconciliation. The agent interacts with the lake through a tool surface that includes (a) \emph{search} (\texttt{search\_datasets}), (b) \emph{file inspection} (\texttt{peek\_file}, \texttt{peek\_multiple}), (c) \emph{query} (\texttt{query\_file} over CSV/Parquet/JSON), (d) \emph{code execution} (\texttt{execute\_code} for Python operations), (e) \emph{download} (\texttt{download\_file} to local storage), plus utilities for XML parsing and text grep.
+
+\subsection{Discovery vs.\ Commitment}
+
+A central distinction structures the rest of this paper: \textbf{discovery} (finding candidate sources) and \textbf{commitment} (extracting usable evidence from a chosen source) are different activities with different failure modes. Discovery is one-shot per candidate; commitment is multi-turn. Text-centric Agentic RAG conflates the two because passages need only be retrieved, not committed-to: reading a passage is the same operation as deciding it is relevant. Tabular sources break this equivalence. A relevant table can still fail to yield evidence: the column you need may not exist, the file may not parse, the join key may be encoded differently across sources, or your filter may return zero rows. MOMO's architecture is built around this discovery--commitment split: search subagents handle discovery; inspect subagents handle commitment; the planner orchestrates both.
+
+\subsection{Related Work}
+
+\paragraph{Agentic RAG.} ReAct~\cite{yao2023react} and IRCoT~\cite{trivedi2023ircot} interleave retrieval with reasoning steps. FLARE~\cite{jiang2023flare} and Self-RAG~\cite{asai2024selfrag} add reflective triggers that decide when to retrieve next. These systems implicitly assume that the gap between a relevant passage and a usable answer is small. Toolformer~\cite{schick2023toolformer} and ToolLLM~\cite{qin2024toolllm} generalize tool use but do not separately address multi-turn source commitments.
+
+\paragraph{Tabular QA benchmarks.} WikiSQL~\cite{zhong2017seq2sql}, Spider~\cite{yu2018spider}, BIRD~\cite{li2023bird}, and Spider 2.0~\cite{lei2024spider2} target text-to-SQL with known schemas. HybridQA~\cite{chen2020hybridqa}, FeTaQA~\cite{nan2022fetaqa}, and TAT-QA~\cite{zhu2021tatqa} cover tabular and hybrid QA at smaller scales. LakeQA~\cite{wang2026lakeqa} extends this to a million-scale data lake where the agent must perform the entire pipeline: discover, peek, query, execute, and reconcile.
+
+\paragraph{Data-lake discovery.} Aurum~\cite{fernandez2018aurum}, the Data Civilizer~\cite{deng2017datacivilizer} system, D3L~\cite{bogatu2020d3l}, Starmie~\cite{fan2023starmie}, and LakeBench~\cite{chai2024lakebench} address discovery as a standalone problem. MOMO assumes such systems can be plugged in as the search subagent's underlying tool, and focuses on the orchestration layer above.
+
+\paragraph{Agent benchmarks and harnesses.} WebArena~\cite{zhou2024webarena} and GAIA~\cite{mialon2023gaia} popularize multi-step agent evaluation; HELM~\cite{liang2022helm}, AgentBoard~\cite{liu2024agentboard}, and BLADE~\cite{gu2024blade} provide structured evaluation harnesses. None of these isolates the tabular execution-discipline problem we target here.
+
+\paragraph{Planner-executor splits.} Multi-agent splits where one model plans and others execute appear in web-agent settings (e.g.,~\cite{zhou2024webarena}) and in industrial deployments. MOMO contributes a tabular-specific instantiation: explicit search and inspect contracts, source-family scoping, file-reference guards, and a partial-success protocol tied to enumerated \texttt{missing\_outputs}.
+
+\paragraph{Text-to-SQL with decomposition.} DIN-SQL~\cite{pourreza2023dinsql} decomposes complex SQL generation into sub-tasks. MOMO operates at a higher abstraction level: it decomposes the entire \emph{commit-to-a-source} workflow, of which SQL generation is one step.

@@ -1,0 +1,28 @@
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+\subsection{Limitations}
+
+\paragraph{Latency and cost of subagent spawning.} Each subagent contract incurs the cost of spinning up a fresh agent: prompt construction, tool registration, plugin wiring, and any model-side initialization for the first turn. Across many short contracts, this overhead is non-trivial. The current budget-calibration approach is manual: we set per-task budgets that we believe are roomy enough for typical sources, and the runtime exposes \texttt{budget\_exhausted} as feedback for re-tuning.
+
+\paragraph{Source-family selection depends on planner quality.} The inspect subagent's discipline is contingent on the planner choosing the right \texttt{source\_family\_ids} in the first place. If the planner mis-routes a contract to the wrong source family, the worker will fail or return \texttt{missing\_outputs} that the planner then has to interpret. MOMO does not currently provide a primitive for the worker to suggest an alternative family.
+
+\paragraph{No mid-run adaptive budget reallocation.} The runtime records per-contract budget usage and tools-used breakdowns, but the planner does not adaptively reallocate budget mid-run based on completed-contract statistics. A planner that observes three consecutive \texttt{budget\_exhausted} returns continues to issue contracts with the same default budget unless prompted otherwise.
+
+\paragraph{Package naming.} As noted in Section~\ref{sec:implementation}, the implementation lives under \texttt{sana\_evaluation/} for historical reasons. The rename is queued as a follow-on refactor and does not affect functionality.
+
+\paragraph{Single benchmark family.} Evaluation is restricted to LakeQA-derived multi-source public-data tasks. Whether MOMO's mechanisms transfer cleanly to enterprise data warehouses (with schema regularity but tighter security constraints) or to scientific data archives (with heterogeneous file formats and metadata-poor sources) is an open question.
+
+\paragraph{No human-in-the-loop conditions.} All MOMO runs in this paper are fully autonomous. Whether the contract structure surfaces the right hooks for human intervention --- ``review this \texttt{partial} return before I retry'' --- is a separate evaluation we have not conducted.
+
+\subsection{Future Work}
+
+\paragraph{Adaptive budget reallocation.} The most direct extension is to let the planner use observed \texttt{partial}/\texttt{failed}/\texttt{budget\_exhausted} rates from completed contracts to dynamically adjust the budget on subsequent contracts. The ledger already records the inputs; the missing piece is the policy.
+
+\paragraph{Cross-contract evidence reuse.} \texttt{answer\_fragments} from successful contracts could be cached and surfaced to subsequent contracts as \texttt{known\_context}, reducing redundant work when multiple contracts converge on the same underlying file.
+
+\paragraph{Typed contract DSL.} \texttt{\_FileReferenceGuard} and \texttt{\_InspectSourceGuard} encode contract semantics in Python steering-handler subclasses. A typed DSL --- declaring tool surface, allowed sources, required outputs, and return-schema validation in one place --- would make new contract variants quicker to author and verify, and would simplify the rename to \texttt{momo\_evaluation/}.
+
+\paragraph{Splitting the SANA harness from the MOMO runtime extension.} The current implementation co-locates the SANA ablation framework and the MOMO runtime extension under \texttt{sana\_evaluation/}. A clean split would let downstream users adopt MOMO without inheriting SANA-specific evaluation plumbing.
+
+\paragraph{Generalizing the partial-success protocol.} The protocol (status + \texttt{missing\_outputs}) is currently MOMO-specific. Lifting it to a baseline-agnostic library --- so other tabular agents can adopt the partial-success shape without adopting all of MOMO --- would let us test the protocol's value in isolation.

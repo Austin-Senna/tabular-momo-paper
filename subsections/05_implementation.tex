@@ -1,0 +1,71 @@
+\section{Implementation}
+\label{sec:implementation}
+
+MOMO is implemented as a modular extension of an existing exploratory-QA harness, not as a fork of it. The baseline \texttt{DataLakeAgent} is reused unmodified; MOMO is delivered through a subclass that overrides five generic extension hooks. This design lets us run identical tasks through the baseline and through each MOMO configuration with no code-path divergence in the baseline itself.
+
+\subsection{Extension Hooks}
+
+\texttt{SanaDataLakeAgent} (the implementation's current class name; see the naming caveat at the end of this section) extends \texttt{DataLakeAgent} through five hooks:
+
+\begin{enumerate}
+\item \texttt{\_pre\_build\_setup()} --- resets delegation cost tracking when the \texttt{delegation} flag is on. This ensures per-task subagent cost is isolated.
+\item \texttt{\_extra\_prompt\_text()} --- composes prompt blocks for each active flag (\texttt{cot\_block()}, \texttt{delegation\_block()}, \texttt{sprint\_block()}). The blocks document the contract or protocol the model must follow.
+\item \texttt{\_extra\_plugins()} --- wires the runtime plugins: \texttt{CoTSteerHandler}, \texttt{SprintSteerHandler}, and a \texttt{StateOfTaskDashboardPlugin} that maintains the persistent state-of-task readout used by \texttt{sprint}.
+\item \texttt{\_conversation\_manager()} --- returns a \texttt{SummarizingConversationManager} tuned to preserve plans in the conversation and to render them as completion checklists, which helps the planner track \texttt{missing\_outputs} across multiple inspect-contract returns.
+\item \texttt{\_decorate\_tools()} --- swaps \texttt{peek\_file} and \texttt{peek\_multiple} for the profile-enriched wrappers when \texttt{results} is on; injects \texttt{search\_subagent} and \texttt{inspect\_subagent} (with bound guards) when \texttt{delegation} is on; injects the \texttt{cot} and \texttt{sprint} tools when those flags are on.
+\end{enumerate}
+
+The baseline \texttt{DataLakeAgent} is never modified. With all flags off, \texttt{SanaDataLakeAgent} reduces to the baseline plus the conversation-manager swap, which is itself optional via configuration. \texttt{SanaBatchRunner} is a one-line subclass of the baseline batch runner: it sets \texttt{\_AGENT\_CLASS = SanaDataLakeAgent}.
+
+\subsection{Flags and Configuration}
+
+Feature toggles live in a \texttt{SanaFlags} dataclass with four opt-in booleans (\texttt{sprint}, \texttt{cot}, \texttt{results}, \texttt{delegation}) plus hyperparameters: the macro-reflection cadence $k$ for \texttt{sprint}-cadence mode, the sprint mode itself (\texttt{cadence} or \texttt{commitment}), and per-subagent call budgets (\texttt{max\_search\_subagent\_calls}, \texttt{max\_inspect\_subagent\_calls}, grace calls). Validation enforces the \texttt{sprint}/\texttt{delegation} mutual-exclusion rule, plus plan-mode dependencies for features that require the baseline planner to be present.
+
+\texttt{SanaFlags} is composed into a \texttt{SanaRunConfig}, which extends the baseline \texttt{RunConfig} by adding a \texttt{sana\_flags} field. The rest of the evaluation harness (task loading, tool budgeting, tracing, logging, result writing) consumes \texttt{RunConfig} via duck typing and is untouched.
+
+\subsection{Delegation Runtime}
+
+The delegation runtime lives in \texttt{sana\_evaluation/tools/delegation\_*.py}. \texttt{DelegationRuntime} owns the lifecycle of a subagent contract:
+
+\begin{enumerate}
+\item Validate the incoming \texttt{SearchContract} or \texttt{InspectContract}, including budget bounds.
+\item Spawn a fresh agent with the appropriate tool surface (retrieval tools for search; full data-tool set for inspect).
+\item Inject the relevant guards (\texttt{\_FileReferenceGuard} for both; \texttt{\_InspectSourceGuard} additionally for inspect).
+\item Attach a \texttt{\_SubagentBudgetSteer} that enforces the call budget and grace calls, and a \texttt{\_SubagentToolLedger} that records every tool call, token usage, and cost.
+\item Run the agent until it emits a single \texttt{contract\_return} call, until the budget is exhausted, or until a fatal failure.
+\item Validate the return payload against the schema and surface it to the planner.
+\end{enumerate}
+
+The runtime makes the contract lifecycle observable: every contract has a recorded start event, end event, budget usage, tools-used list, token usage, and cost. This is the evaluation surface used by Table~\ref{tab:budget} (subagent-budget sensitivity).
+
+\subsection{Companion Tools}
+
+The companion features live as small, focused tools:
+
+\begin{itemize}
+\item \texttt{tools/peek\_file\_with\_profile.py} wraps \texttt{peek\_file} and \texttt{peek\_multiple}. The wrapper delegates to the baseline implementation, then attaches a \texttt{profile} field loaded from \texttt{data/datagov\_tables\_profiles.jsonl} (precomputed) or from the ideal-search wrapper's schema cache. If no profile is available, the field is omitted silently rather than reported as an error.
+\item \texttt{tools/cot\_tool.py} implements the \texttt{cot(kind=...)} tool with separate pre- and post-tool variants. The \texttt{CoTSteerHandler} plugin appends the post-tool schema reminder directly to tool results rather than relying only on the system prompt, which we found significantly increases compliance.
+\item \texttt{tools/sprint\_tool.py} implements the \texttt{sprint} tool, which calls a private \texttt{upsert\_prompt\_section} helper to update the agent's system prompt in place. A separate \texttt{plugins/source\_session.py} tracks the current source via \texttt{source\_from\_tool\_use()}, which extracts dataset IDs from tool arguments to detect source switches.
+\end{itemize}
+
+\subsection{CLI and Ablation Axes}
+
+The CLI entrypoint \texttt{run\_sana\_eval.py} exposes the configuration surface used in Section~\ref{sec:experiments}:
+
+\begin{itemize}
+\item \texttt{--search\_tool} $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--search\_results} $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--agent\_management} (alias \texttt{--plans}) $\in$ \{naive, preloaded, standard, ideal\}.
+\item \texttt{--computation\_tool} $\in$ \{standard, ideal, $\ldots$\}.
+\item \texttt{--max\_tool\_calls N}.
+\item \texttt{--k N} (macro-reflection cadence for \texttt{sprint}).
+\item \texttt{--sana-feature \{sprint,cot,results,delegation\}} (repeatable).
+\item \texttt{--sprint-mode \{cadence,commitment\}}.
+\item \texttt{--commitment-budget-calls N}, \texttt{--max-search-subagent-calls N}, \texttt{--max-inspect-subagent-calls N}.
+\end{itemize}
+
+A friendly preset wrapper provides reproducible smoke and full evaluation configurations, including default model aliases, tool budgets, subagent budgets, and result/log directory conventions.
+
+\subsection{Naming Caveat}
+
+The implementation package is currently named \texttt{sana\_evaluation/} because it grew alongside the SANA ablation framework described in our companion paper. The runtime-control features documented here --- \texttt{delegation}, \texttt{sprint}, \texttt{cot}, \texttt{results} --- are the MOMO contribution. Renaming the package to \texttt{momo\_evaluation/} (or splitting the SANA harness from the MOMO runtime extension) is queued as a follow-on refactor and does not affect the experimental results reported in Section~\ref{sec:experiments}.
